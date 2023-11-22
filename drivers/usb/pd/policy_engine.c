@@ -10,6 +10,7 @@
  * GNU General Public License for more details.
  */
 
+#define DEBUG
 #include <linux/completion.h>
 #include <linux/delay.h>
 #include <linux/hrtimer.h>
@@ -34,7 +35,7 @@ static bool usb_compliance_mode;
 module_param(usb_compliance_mode, bool, S_IRUGO|S_IWUSR);
 MODULE_PARM_DESC(usb_compliance_mode, "Start USB stack for USB3.1 compliance testing");
 
-static bool disable_usb_pd;
+static bool disable_usb_pd = 1;
 module_param(disable_usb_pd, bool, S_IRUGO|S_IWUSR);
 MODULE_PARM_DESC(disable_usb_pd, "Disable USB PD for USB3.1 compliance testing");
 

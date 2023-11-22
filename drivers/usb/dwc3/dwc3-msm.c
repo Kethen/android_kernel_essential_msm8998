@@ -11,6 +11,7 @@
  *
  */
 
+#define DEBUG
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/slab.h>
@@ -200,6 +201,7 @@ struct dwc3_msm {
 	struct power_supply	*usb_psy;
 	struct work_struct	vbus_draw_work;
 	bool			in_host_mode;
+	bool vbus_reg_on;
 	enum usb_device_speed	max_rh_port_speed;
 	unsigned int		tx_fifo_size;
 	bool			vbus_active;
@@ -236,6 +238,9 @@ struct dwc3_msm {
 	struct delayed_work sdp_check;
 	struct mutex suspend_resume_mutex;
 };
+
+static int force_id = 0;
+static atomic_t suspend_intent = {0};
 
 #define USB_HSPHY_3P3_VOL_MIN		3050000 /* uV */
 #define USB_HSPHY_3P3_VOL_MAX		3300000 /* uV */
@@ -2141,7 +2146,7 @@ static int dwc3_msm_suspend(struct dwc3_msm *mdwc)
 					mdwc->lpm_to_suspend_delay);
 		pm_wakeup_event(mdwc->dev, mdwc->lpm_to_suspend_delay);
 	} else {
-		pm_relax(mdwc->dev);
+		//pm_relax(mdwc->dev);
 	}
 
 	atomic_set(&dwc->in_lpm, 1);
@@ -2181,7 +2186,7 @@ static int dwc3_msm_resume(struct dwc3_msm *mdwc)
 		return 0;
 	}
 
-	pm_stay_awake(mdwc->dev);
+	//pm_stay_awake(mdwc->dev);
 
 	/* Enable bus voting */
 	if (mdwc->bus_perf_client) {
@@ -2322,10 +2327,12 @@ static int dwc3_msm_resume(struct dwc3_msm *mdwc)
  *
  * Returns 0 on success
  */
-static void dwc3_ext_event_notify(struct dwc3_msm *mdwc)
+static void dwc3_ext_event_notify(struct dwc3_msm *mdwc, bool from_sm_work)
 {
 	/* Flush processing any pending events before handling new ones */
-	flush_delayed_work(&mdwc->sm_work);
+	if(!from_sm_work){
+		flush_delayed_work(&mdwc->sm_work);
+	}
 
 	if (mdwc->id_state == DWC3_ID_FLOAT) {
 		dev_dbg(mdwc->dev, "XCVR: ID set\n");
@@ -2380,7 +2387,7 @@ static void dwc3_resume_work(struct work_struct *w)
 	}
 
 	dbg_event(0xFF, "RWrk", dwc->is_drd);
-	dwc3_ext_event_notify(mdwc);
+	dwc3_ext_event_notify(mdwc, false);
 }
 
 static void dwc3_pwr_event_handler(struct dwc3_msm *mdwc)
@@ -2619,6 +2626,10 @@ static int dwc3_msm_id_notifier(struct notifier_block *nb,
 	}
 
 	id = event ? DWC3_ID_GROUND : DWC3_ID_FLOAT;
+	if(force_id != 2){
+		dev_dbg(mdwc->dev, "%s: id is %d, forcing id to %d instead\n", __func__, id, force_id);
+		id = force_id;
+	}
 
 	dev_dbg(mdwc->dev, "host:%ld (id:%d) event received\n", event, id);
 
@@ -2680,6 +2691,11 @@ static int dwc3_msm_vbus_notifier(struct notifier_block *nb,
 	}
 
 	dev_dbg(mdwc->dev, "vbus:%ld event received\n", event);
+
+	if(force_id != 2){
+		dev_dbg(mdwc->dev, "%s: id is %d, forcing id to %d instead\n", __func__, mdwc->id_state, force_id);
+		mdwc->id_state = force_id;
+	}
 
 	if (mdwc->vbus_active == event)
 		return NOTIFY_DONE;
@@ -2772,6 +2788,10 @@ static ssize_t mode_show(struct device *dev, struct device_attribute *attr,
 {
 	struct dwc3_msm *mdwc = dev_get_drvdata(dev);
 
+	if (mdwc->vbus_active && mdwc->id_state == DWC3_ID_GROUND){
+		return snprintf(buf, PAGE_SIZE, "host_with_vbus\n");
+	}
+
 	if (mdwc->vbus_active)
 		return snprintf(buf, PAGE_SIZE, "peripheral\n");
 	if (mdwc->id_state == DWC3_ID_GROUND)
@@ -2791,17 +2811,42 @@ static ssize_t mode_store(struct device *dev, struct device_attribute *attr,
 	} else if (sysfs_streq(buf, "host")) {
 		mdwc->vbus_active = false;
 		mdwc->id_state = DWC3_ID_GROUND;
+	} else if (sysfs_streq(buf, "host_with_vbus")) {
+		mdwc->vbus_active = true;
+		mdwc->id_state = DWC3_ID_GROUND;
 	} else {
 		mdwc->vbus_active = false;
 		mdwc->id_state = DWC3_ID_FLOAT;
 	}
 
-	dwc3_ext_event_notify(mdwc);
+	dwc3_ext_event_notify(mdwc, false);
 
 	return count;
 }
 
 static DEVICE_ATTR_RW(mode);
+
+static ssize_t force_id_show(struct device *dev, struct device_attribute *attr,
+		char *buf)
+{
+	return snprintf(buf, PAGE_SIZE, "%d\n", force_id);
+}
+
+static ssize_t force_id_store(struct device *dev, struct device_attribute *attr,
+		const char *buf, size_t count)
+{
+	if(sysfs_streq(buf, "1")){
+		force_id = 1;
+	}else if(sysfs_streq(buf, "2")){
+		force_id = 2;
+	}else{
+		force_id = 0;
+	}
+
+	return count;
+}
+
+static DEVICE_ATTR_RW(force_id);
 
 static ssize_t speed_show(struct device *dev, struct device_attribute *attr,
 		char *buf)
@@ -3211,14 +3256,18 @@ static int dwc3_msm_probe(struct platform_device *pdev)
 	device_create_file(&pdev->dev, &dev_attr_mode);
 	device_create_file(&pdev->dev, &dev_attr_speed);
 	device_create_file(&pdev->dev, &dev_attr_xhci_link_compliance);
+	device_create_file(&pdev->dev, &dev_attr_force_id);
 
 	host_mode = usb_get_dr_mode(&mdwc->dwc3->dev) == USB_DR_MODE_HOST;
+	if(force_id == 0){
+		host_mode = true;
+	}
 	if (host_mode ||
 		(dwc->is_drd && !of_property_read_bool(node, "extcon"))) {
 		dev_dbg(&pdev->dev, "DWC3 in default host mode\n");
 		mdwc->host_only_mode = true;
 		mdwc->id_state = DWC3_ID_GROUND;
-		dwc3_ext_event_notify(mdwc);
+		dwc3_ext_event_notify(mdwc, false);
 	}
 
 	return 0;
@@ -3461,16 +3510,20 @@ static int dwc3_otg_start_host(struct dwc3_msm *mdwc, int on)
 		pm_runtime_get_sync(mdwc->dev);
 		dbg_event(0xFF, "StrtHost gync",
 			atomic_read(&mdwc->dev->power.usage_count));
-		if (!IS_ERR(mdwc->vbus_reg))
-			ret = regulator_enable(mdwc->vbus_reg);
-		if (ret) {
-			dev_err(mdwc->dev, "unable to enable vbus_reg\n");
-			mdwc->hs_phy->flags &= ~PHY_HOST_MODE;
-			mdwc->ss_phy->flags &= ~PHY_HOST_MODE;
-			pm_runtime_put_sync(mdwc->dev);
-			dbg_event(0xFF, "vregerr psync",
-				atomic_read(&mdwc->dev->power.usage_count));
-			return ret;
+		/* do not power on vbus if it's already available */
+		if (!mdwc->vbus_active){
+			if (!IS_ERR(mdwc->vbus_reg))
+				ret = regulator_enable(mdwc->vbus_reg);
+			if (ret) {
+				dev_err(mdwc->dev, "unable to enable vbus_reg\n");
+				mdwc->hs_phy->flags &= ~PHY_HOST_MODE;
+				mdwc->ss_phy->flags &= ~PHY_HOST_MODE;
+				pm_runtime_put_sync(mdwc->dev);
+				dbg_event(0xFF, "vregerr psync",
+					atomic_read(&mdwc->dev->power.usage_count));
+				return ret;
+			}
+			mdwc->vbus_reg_on = true;
 		}
 
 		dwc3_set_mode(dwc, DWC3_GCTL_PRTCAP_HOST);
@@ -3553,12 +3606,13 @@ static int dwc3_otg_start_host(struct dwc3_msm *mdwc, int on)
 		dev_dbg(mdwc->dev, "%s: turn off host\n", __func__);
 
 		usb_unregister_atomic_notify(&mdwc->usbdev_nb);
-		if (!IS_ERR(mdwc->vbus_reg))
+		if (!IS_ERR(mdwc->vbus_reg) && mdwc->vbus_reg_on)
 			ret = regulator_disable(mdwc->vbus_reg);
 		if (ret) {
 			dev_err(mdwc->dev, "unable to disable vbus_reg\n");
 			return ret;
 		}
+		mdwc->vbus_reg_on = false;
 
 		cancel_delayed_work_sync(&mdwc->perf_vote_work);
 		msm_dwc3_perf_vote_update(mdwc, false);
@@ -3750,6 +3804,7 @@ static void dwc3_otg_sm_work(struct work_struct *w)
 	int ret = 0;
 	unsigned long delay = 0;
 	const char *state;
+	int intent = 0;
 
 	if (mdwc->dwc3)
 		dwc = platform_get_drvdata(mdwc->dwc3);
@@ -3920,6 +3975,20 @@ static void dwc3_otg_sm_work(struct work_struct *w)
 
 	}
 
+	intent = atomic_read(&suspend_intent);
+	if(intent && force_id == DWC3_ID_GROUND){
+		if(!work){
+			delay = VBUS_REG_CHECK_DELAY;
+		}
+		work = 1;
+		atomic_sub(1, &suspend_intent);
+		if(intent == 1 && force_id == DWC3_ID_GROUND){
+			mdwc->id_state = DWC3_ID_GROUND;
+			dwc3_ext_event_notify(mdwc, true);
+			return;
+		}
+	}
+
 	if (work)
 		queue_delayed_work(system_freezable_wq, &mdwc->sm_work, delay);
 
@@ -3939,8 +4008,18 @@ static int dwc3_msm_pm_suspend(struct device *dev)
 
 	flush_workqueue(mdwc->dwc3_wq);
 	if (!atomic_read(&dwc->in_lpm)) {
+		if(force_id == DWC3_ID_GROUND && mdwc->id_state == DWC3_ID_GROUND){
+			mdwc->id_state = DWC3_ID_FLOAT;
+			dwc3_ext_event_notify(mdwc, false);
+			atomic_set(&suspend_intent, 6);
+		}
 		dev_err(mdwc->dev, "Abort PM suspend!! (USB is outside LPM)\n");
 		return -EBUSY;
+	}
+
+	if(force_id == DWC3_ID_GROUND){
+		mdwc->id_state = DWC3_ID_GROUND;
+		atomic_set(&suspend_intent, 0);
 	}
 
 	ret = dwc3_msm_suspend(mdwc);
