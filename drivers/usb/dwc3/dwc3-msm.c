@@ -4017,14 +4017,15 @@ static int dwc3_msm_pm_suspend(struct device *dev)
 		return -EBUSY;
 	}
 
-	if(force_id == DWC3_ID_GROUND){
-		mdwc->id_state = DWC3_ID_GROUND;
-		atomic_set(&suspend_intent, 0);
-	}
 
 	ret = dwc3_msm_suspend(mdwc);
-	if (!ret)
+	if (!ret){
 		atomic_set(&mdwc->pm_suspended, 1);
+		// extend ground id enter delay
+		if(force_id == DWC3_ID_GROUND){
+			atomic_set(&suspend_intent, 12);
+		}
+	}
 
 	return ret;
 }
@@ -4040,6 +4041,11 @@ static int dwc3_msm_pm_resume(struct device *dev)
 	/* flush to avoid race in read/write of pm_suspended */
 	flush_workqueue(mdwc->dwc3_wq);
 	atomic_set(&mdwc->pm_suspended, 0);
+
+	// go back to forced ground id with a delay
+	if(force_id == DWC3_ID_GROUND){
+		atomic_set(&suspend_intent, 3);
+	}
 
 	/* kick in otg state machine */
 	queue_work(mdwc->dwc3_wq, &mdwc->resume_work);
