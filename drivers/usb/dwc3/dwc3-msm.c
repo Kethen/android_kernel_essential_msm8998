@@ -3846,7 +3846,7 @@ static void dwc3_otg_sm_work(struct work_struct *w)
 			dev_dbg(mdwc->dev, "!id\n");
 			mdwc->otg_state = OTG_STATE_A_IDLE;
 			work = 1;
-		} else if (test_bit(B_SESS_VLD, &mdwc->inputs)) {
+		} else if (test_bit(B_SESS_VLD, &mdwc->inputs) && force_id != DWC3_ID_GROUND) {
 			dev_dbg(mdwc->dev, "b_sess_vld\n");
 			if (get_psy_type(mdwc) == POWER_SUPPLY_TYPE_USB_FLOAT)
 				queue_delayed_work(mdwc->dwc3_wq,
@@ -3976,7 +3976,7 @@ static void dwc3_otg_sm_work(struct work_struct *w)
 	}
 
 	intent = atomic_read(&suspend_intent);
-	if(intent && force_id == DWC3_ID_GROUND){
+	if(intent && force_id == DWC3_ID_GROUND && mdwc->id_state != DWC3_ID_GROUND){
 		if(!work){
 			delay = VBUS_REG_CHECK_DELAY;
 		}
