@@ -241,6 +241,7 @@ struct dwc3_msm {
 
 static int force_id = 0;
 static atomic_t suspend_intent = {0};
+static bool sm_staying_awake = false;
 
 #define USB_HSPHY_3P3_VOL_MIN		3050000 /* uV */
 #define USB_HSPHY_3P3_VOL_MAX		3300000 /* uV */
@@ -3949,7 +3950,7 @@ static void dwc3_otg_sm_work(struct work_struct *w)
 			} else if (ret) {
 				dev_err(mdwc->dev, "unable to start host\n");
 				mdwc->otg_state = OTG_STATE_A_IDLE;
-				goto ret;
+				//goto ret;
 			}
 		}
 		break;
@@ -3975,6 +3976,17 @@ static void dwc3_otg_sm_work(struct work_struct *w)
 
 	}
 
+	if(work){
+		// reduce system suspend flipping
+		if(!sm_staying_awake){
+			pm_stay_awake(mdwc->dev);
+			sm_staying_awake = true;
+		}
+	}else{
+		pm_relax(mdwc->dev);
+		sm_staying_awake = false;
+	}
+
 	intent = atomic_read(&suspend_intent);
 	if(intent && force_id == DWC3_ID_GROUND && mdwc->id_state != DWC3_ID_GROUND){
 		if(!work){
@@ -3992,7 +4004,7 @@ static void dwc3_otg_sm_work(struct work_struct *w)
 	if (work)
 		queue_delayed_work(system_freezable_wq, &mdwc->sm_work, delay);
 
-ret:
+//ret:
 	return;
 }
 
